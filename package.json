@@ -1,0 +1,13 @@
+{
+  "name": "minecraft-bot-railway",
+  "version": "1.0.0",
+  "description": "Minecraft bot deployed on Railway",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mineflayer": "^4.20.0"
+  }
+}
