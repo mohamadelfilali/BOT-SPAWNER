@@ -1,72 +1,242 @@
 const mineflayer = require('mineflayer');
 const express = require('express');
-const app = express();
 
-// تفعيل قراءة البيانات المرسلة بصيغة JSON (مهم لربطه بالواجهة لاحقاً)
+const app = express();
 app.use(express.json());
 
-let bot = null;
-
-// 1. سيرفر الويب لمنع توقف الاستضافة وللربط مع الواجهة
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => {
-    res.send({ status: bot ? "مصل" : "غير متصل", message: "سيرفر البوت يعمل بنجاح" });
-});
 
-// 2. دالة تشغيل البوت وإعداداتها
-function startBot(options) {
-    // إذا كان هناك بوت يعمل حالياً، نقوم بفصله أولاً قبل تشغيل الجديد
-    if (bot) {
-        bot.quit();
-    }
+// تخزين البوتات
+const bots = new Map();
 
-    console.log(`جاري تشغيل البوت للإصدار: ${options.version || 'تلقائي'}`);
+// =========================
+// إنشاء بوت جديد
+// =========================
+function createBot(config) {
+    const botId = config.id;
 
-    bot = mineflayer.createBot({
-        host: options.host || process.env.MC_HOST,
-        port: parseInt(options.port) || parseInt(process.env.MC_PORT) || 25565,
-        username: options.username || process.env.MC_USERNAME || 'Bot_Railway',
-        version: options.version || process.env.MC_VERSION || false // دعم تغيير الإصدارات
+    const bot = mineflayer.createBot({
+        host: config.host,
+        port: parseInt(config.port) || 25565,
+        username: config.username,
+        version: config.version || false
     });
 
-    // أحداث البوت (Events)
+    const data = {
+        id: botId,
+        bot,
+        config,
+        status: 'connecting',
+        logs: [],
+        reconnect: true
+    };
+
+    bots.set(botId, data);
+
+    function log(message) {
+        const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+        data.logs.push(line);
+
+        if (data.logs.length > 100) {
+            data.logs.shift();
+        }
+
+        console.log(`[${botId}] ${message}`);
+    }
+
     bot.on('spawn', () => {
-        console.log(`[${bot.username}] دخل السيرفر بنجاح!`);
+        data.status = 'online';
+        log('Bot connected successfully');
     });
 
     bot.on('chat', (username, message) => {
-        console.log(`[شات اللعبة] ${username}: ${message}`);
+        log(`${username}: ${message}`);
     });
 
-    bot.on('disconnect', (reason) => {
-        console.log(`انقطع الاتصال: ${reason}`);
+    bot.on('end', () => {
+        data.status = 'offline';
+        log('Disconnected');
+
+        if (data.reconnect) {
+            log('Reconnecting in 10 seconds...');
+
+            setTimeout(() => {
+                createBot(config);
+            }, 10000);
+        }
     });
 
     bot.on('error', (err) => {
-        console.error('حدث خطأ في البوت:', err);
+        log(`Error: ${err.message}`);
     });
+
+    return data;
 }
 
-// 3. مسار (API) لاستقبال الرسائل والأوامر من الواجهة ليرسلها البوت داخل السيرفر
-app.post('/api/send-chat', (req, res) => {
-    const { message } = req.body;
-    if (bot && bot.spawned) {
-        bot.chat(message); // إرسال الرسالة أو الأمر (مثال: /spawn) داخل السيرفر
-        return res.json({ success: true, message: "تم إرسال الرسالة بنجاح" });
+// =========================
+// الصفحة الرئيسية
+// =========================
+app.get('/', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Minecraft Bot Manager Running',
+        bots: bots.size
+    });
+});
+
+// =========================
+// إنشاء بوت
+// =========================
+app.post('/api/bots/create', (req, res) => {
+
+    const {
+        id,
+        host,
+        port,
+        username,
+        version
+    } = req.body;
+
+    if (!id) {
+        return res.status(400).json({
+            success: false,
+            message: 'Bot ID required'
+        });
     }
-    return res.status(400).json({ success: false, message: "البوت غير متصل بالسيرفر حالياً" });
+
+    if (bots.has(id)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Bot already exists'
+        });
+    }
+
+    createBot({
+        id,
+        host,
+        port,
+        username,
+        version
+    });
+
+    res.json({
+        success: true,
+        message: 'Bot created'
+    });
 });
 
-// 4. مسار (API) لتغيير إعدادات البوت (الإصدار، السيرفر، الاسم) وتشغيله من جديد
-app.post('/api/connect', (req, res) => {
-    const { host, port, username, version } = req.body;
-    startBot({ host, port, username, version });
-    res.json({ success: true, message: "جاري تشغيل البوت بالإعدادات الجديدة..." });
+// =========================
+// حذف بوت
+// =========================
+app.delete('/api/bots/:id', (req, res) => {
+
+    const id = req.params.id;
+
+    const botData = bots.get(id);
+
+    if (!botData) {
+        return res.status(404).json({
+            success: false
+        });
+    }
+
+    botData.reconnect = false;
+    botData.bot.quit();
+
+    bots.delete(id);
+
+    res.json({
+        success: true,
+        message: 'Bot removed'
+    });
 });
 
-// تشغيل البوت تلقائياً عند تشغيل السيرفر بالإعدادات الافتراضية
-startBot({});
+// =========================
+// قائمة البوتات
+// =========================
+app.get('/api/bots', (req, res) => {
+
+    const result = [];
+
+    bots.forEach((data) => {
+
+        result.push({
+            id: data.id,
+            username: data.config.username,
+            host: data.config.host,
+            status: data.status
+        });
+
+    });
+
+    res.json(result);
+});
+
+// =========================
+// إرسال رسالة أو أمر
+// =========================
+app.post('/api/bots/:id/chat', (req, res) => {
+
+    const id = req.params.id;
+    const { message } = req.body;
+
+    const botData = bots.get(id);
+
+    if (!botData) {
+        return res.status(404).json({
+            success: false
+        });
+    }
+
+    botData.bot.chat(message);
+
+    res.json({
+        success: true
+    });
+});
+
+// =========================
+// السجلات
+// =========================
+app.get('/api/bots/:id/logs', (req, res) => {
+
+    const id = req.params.id;
+
+    const botData = bots.get(id);
+
+    if (!botData) {
+        return res.status(404).json({
+            success: false
+        });
+    }
+
+    res.json(botData.logs);
+});
+
+// =========================
+// معلومات بوت
+// =========================
+app.get('/api/bots/:id', (req, res) => {
+
+    const id = req.params.id;
+
+    const botData = bots.get(id);
+
+    if (!botData) {
+        return res.status(404).json({
+            success: false
+        });
+    }
+
+    res.json({
+        id: botData.id,
+        username: botData.config.username,
+        host: botData.config.host,
+        version: botData.config.version,
+        status: botData.status
+    });
+});
 
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
